@@ -1,0 +1,104 @@
+import os
+import numpy as np
+import healpy as hp
+import json
+import pymaster as nmt
+import matplotlib.pyplot as plt
+
+sigma_beam = 0.0004
+NSIDE = 512
+bin_width = 6
+
+
+input_root = /simulations/fits"
+output_root = "simulations/power_spectrum"
+os.makedirs(output_root, exist_ok=True)
+
+
+for folder_num in range(0, 2000):
+    folder_path = os.path.join(input_root, str(folder_num))
+    if not os.path.isdir(folder_path):
+        continue
+
+    fits_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".fits") and "mask" not in f])
+
+    for fits_name in fits_files:
+        shell_name = fits_name.replace(".fits", "")
+        print(f"\nProcessing sim {folder_num}, shell {shell_name}")
+
+        try:
+            # Paths
+            fits_path = os.path.join(folder_path, f"{shell_name}.fits")
+            mask_path = os.path.join(folder_path, f"{shell_name}_mask.fits")
+            meta_path = os.path.join(folder_path, f"{shell_name}_meta.json")
+            # Create per-simulation subfolder
+            sim_output_folder = os.path.join(output_root, str(folder_num))
+            os.makedirs(sim_output_folder, exist_ok=True)
+
+            cl_save_path = os.path.join(sim_output_folder, f"{shell_name}_Cl.npy")
+            cl_plot_path = os.path.join(sim_output_folder, f"{shell_name}_Cl.png")
+
+
+
+            delta_Tb_map = hp.read_map(fits_path, verbose=False)
+            patch_mask = hp.read_map(mask_path, verbose=False).astype(bool)
+            with open(meta_path, "r") as f:
+                metadata = json.load(f)
+
+            mass_mean = metadata["mass_mean"]
+            mass_var = metadata["mass_var"]
+            N_halos = metadata["N_halos"]
+            mean_Tb  = metadata["mean_Tb"]
+
+            mask_float = patch_mask.astype(float)
+            Npix = hp.nside2npix(NSIDE)
+            Omega_pix = 4 * np.pi / Npix
+
+
+            C_ell_shot = Omega_pix * mass_var / (N_halos * mass_mean**2)
+
+
+            field = nmt.NmtField(patch_mask.astype(float), [delta_Tb_map], lmax=1024)
+            l_min = 5
+            bin_width = 6
+            l_max = 1024
+            ell_edges = np.arange(l_min, l_max + bin_width, bin_width)
+
+
+            binning = nmt.NmtBin.from_edges(ell_edges[:-1], ell_edges[1:])
+
+            workspace = nmt.NmtWorkspace()
+            workspace.compute_coupling_matrix(field, field, binning)
+
+            cl_coupled = nmt.compute_coupled_cell(field, field)
+            cl_decoupled = workspace.decouple_cell(cl_coupled)
+            ell_binned = binning.get_effective_ells()
+
+
+            Wl_full = hp.pixwin(NSIDE, lmax=int(l_max))
+            Bl_full = hp.gauss_beam(sigma_beam, lmax=int(l_max))
+            window_total_binned = binning.bin_cell((Wl_full * Bl_full)**2)[0]
+
+
+            Cl_corr = cl_decoupled[0] - C_ell_shot
+            Cl_deconv = Cl_corr / window_total_binned
+            Cl_final = Cl_deconv + C_ell_shot
+
+            np.save(cl_save_path, np.vstack((ell_binned, Cl_final)))
+            print(f"Saved Cl to {cl_save_path}")
+
+            plt.figure(figsize=(8,6))
+            plt.plot(ell_binned, Cl_final, lw=1.5, label=f"sim{folder_num}_{shell_name}")
+            plt.xscale("log")
+            plt.yscale("log")
+            plt.xlabel(r"Multipole $\ell$")
+            plt.ylabel(r"$C_\ell$")
+            plt.title(f"Power Spectrum: sim {folder_num}, {shell_name}")
+            plt.grid(True, which="both")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(cl_plot_path)
+            plt.close()
+
+        except Exception as e:
+            print(f"Error in sim {folder_num}, shell {shell_name}: {e}")
