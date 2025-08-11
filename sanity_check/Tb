@@ -16,9 +16,9 @@ shell_thickness = 30.0
 shell_in = 600.0       
 shell_out = shell_in + shell_thickness        
 
-latin_hypercube_file = "Quijote/latin_hypercube_params.txt"
+latin_hypercube_file = "/project/ag-weller/Kai.Lehman/Quijote/latin_hypercube_params.txt"
 latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
-data = np.loadtxt('/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
+data = np.loadtxt('/project/ag-weller/Asya.Aydin/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
 folder_num = 0
 Omega_m, Omega_b, h, n_s, sigma_8 = latin_data[folder_num]
 Omega_L = 1 - Omega_m
@@ -93,6 +93,8 @@ vol_pix = shell_volume / Npix_patch
 
 mass_map_kg = mass_map_patch * Msun_to_kg
 mass_mean = mass_shell.mean()
+mass_mean_HI = M_HI_vals.mean()
+mass_var_HI = M_HI_vals.var() 
 mass_var  = mass_shell.var()
 N_halos   = len(mass_shell)
 rho_HI = mass_map_kg / vol_pix      
@@ -130,6 +132,8 @@ print("RMS delta T_b:", np.std(delta_Tb_fullsky[patch_mask]))
 print("shell_volume [m^3]:", shell_volume)
 print("mean rho_HI [kg/m^3]:", np.mean(rho_HI))
 
-print(f_sky)
-print(mass_mean)
-print(mass_var)
+print("f_Sky:",f_sky)
+print("mass_mean_halo:", mass_mean)
+print("mass_var_halo:",mass_var)
+print("mass_mean_M_HI:", mass_mean)
+print("mass_var_M_HI::",mass_var)
