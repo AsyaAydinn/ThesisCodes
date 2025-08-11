@@ -1,0 +1,56 @@
+import pymaster as nmt
+
+sigma_beam = 0.0004
+Tb_smooth = hp.smoothing(Tb_fullsky, sigma=sigma_beam)
+valid = (Tb_smooth != hp.UNSEEN) & np.isfinite(Tb_smooth) & patch_mask
+
+mean_Tb = Tb_smooth[valid].mean()
+delta_Tb_fullsky = np.full(Npix, hp.UNSEEN)
+delta_Tb_fullsky[valid] = (Tb_smooth[valid] - mean_Tb) / mean_Tb
+
+delta_Tb_map = hp.ma(delta_Tb_fullsky)
+delta_Tb_map.mask = ~patch_mask  # this defines what's masked out
+
+
+Omega_pix = 4 * np.pi / Npix
+C_ell_shot = Omega_pix * mass_var / (N_halos * mass_mean**2)
+field = nmt.NmtField(patch_mask.astype(float), [delta_Tb_map], lmax=1024)
+
+
+l_min = 5
+l_max = 1024
+bin_width = 6
+ell_edges = np.arange(l_min, l_max + bin_width, bin_width)
+binning = nmt.NmtBin.from_edges(ell_edges[:-1], ell_edges[1:])
+workspace = nmt.NmtWorkspace()
+workspace.compute_coupling_matrix(field, field, binning)
+
+
+cl_coupled = nmt.compute_coupled_cell(field, field)
+cl_decoupled = workspace.decouple_cell(cl_coupled)
+ell_binned = binning.get_effective_ells()
+Wl_full = hp.pixwin(NSIDE, lmax=int(l_max))
+Bl_full = hp.gauss_beam(sigma_beam, lmax=int(l_max))
+window_total_binned = binning.bin_cell((Wl_full * Bl_full)**2)[0]
+
+
+Cl_corr = cl_decoupled[0] - C_ell_shot
+#Cl_corr = np.maximum(Cl_corr, 0)      
+Cl_deconv = Cl_corr /window_total_binned
+Cl_final_1 = Cl_deconv + C_ell_shot     
+
+
+plt.figure(figsize=(8, 6))
+plt.plot(ell_binned,  Cl_final,
+         lw=1.5, label="sim_id =30 shell 630" )
+plt.plot(ell_binned,   Cl_final_1 ,
+         lw=1.5, label="sim_id =1410 shell 630" )
+
+plt.yscale('log')
+plt.xlabel(r"Multipole $\ell$")
+plt.ylabel(r"$C_\ell$")
+plt.title("Brightness Temperature Power")
+plt.grid(True, which="both")
+plt.legend()
+plt.tight_layout()
+plt.show()
