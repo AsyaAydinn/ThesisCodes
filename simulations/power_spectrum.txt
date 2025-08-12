@@ -5,13 +5,12 @@ import json
 import pymaster as nmt
 import matplotlib.pyplot as plt
 
-sigma_beam = 0.0004
 NSIDE = 512
 bin_width = 6
 
 
-input_root = /simulations/fits"
-output_root = "simulations/power_spectrum"
+input_root = "####/simulations/fits"
+output_root ="####/simulations/power_spectrum"
 os.makedirs(output_root, exist_ok=True)
 
 
@@ -31,7 +30,7 @@ for folder_num in range(0, 2000):
             fits_path = os.path.join(folder_path, f"{shell_name}.fits")
             mask_path = os.path.join(folder_path, f"{shell_name}_mask.fits")
             meta_path = os.path.join(folder_path, f"{shell_name}_meta.json")
-            # Create per-simulation subfolder
+
             sim_output_folder = os.path.join(output_root, str(folder_num))
             os.makedirs(sim_output_folder, exist_ok=True)
 
@@ -40,25 +39,32 @@ for folder_num in range(0, 2000):
 
 
 
-            delta_Tb_map = hp.read_map(fits_path, verbose=False)
+            Tb_map = hp.read_map(fits_path, field=0, verbose=False)   
+            DTb_map = hp.read_map(fits_path, field=1, verbose=False) 
+        
             patch_mask = hp.read_map(mask_path, verbose=False).astype(bool)
+            DTb_map[~patch_mask] = 0.0
             with open(meta_path, "r") as f:
                 metadata = json.load(f)
 
+            mass_var_M_HI = metadata["mass_var_M_HI"]
+            mass_mean_M_HI = metadata["mass_mean_M_HI"]
             mass_mean = metadata["mass_mean"]
             mass_var = metadata["mass_var"]
             N_halos = metadata["N_halos"]
             mean_Tb  = metadata["mean_Tb"]
+            f_sky   = metadata["f_sky"]
 
-            mask_float = patch_mask.astype(float)
+            mean_w2 = mass_var_M_HI +mass_mean_M_HI**2
+            Cshot_delta = 4*np.pi * f_sky / N_halos * (mean_w2 / mass_mean_M_HI**2) 
+            mask = hp.read_map(mask_path, verbose=False).astype(bool)
+            mask_apo = nmt.mask_apodization(mask.astype(float), aposize=1.0, apotype="C1") 
+        
             Npix = hp.nside2npix(NSIDE)
             Omega_pix = 4 * np.pi / Npix
 
 
-            C_ell_shot = Omega_pix * mass_var / (N_halos * mass_mean**2)
-
-
-            field = nmt.NmtField(patch_mask.astype(float), [delta_Tb_map], lmax=1024)
+            field = nmt.NmtField(mask_apo, [DTb_map], lmax=1024)
             l_min = 5
             bin_width = 6
             l_max = 1024
@@ -70,25 +76,32 @@ for folder_num in range(0, 2000):
             workspace = nmt.NmtWorkspace()
             workspace.compute_coupling_matrix(field, field, binning)
 
-            cl_coupled = nmt.compute_coupled_cell(field, field)
-            cl_decoupled = workspace.decouple_cell(cl_coupled)
+            Cl_decoupled = workspace.decouple_cell(nmt.compute_coupled_cell(field, field))[0]
             ell_binned = binning.get_effective_ells()
+   
+            Wl = hp.pixwin(NSIDE, lmax=l_max)
+            win_binned = binning.bin_cell(Wl**2)[0]
+            win_binned = np.where(win_binned > 1e-12, win_binned, np.nan)
+            Cl_total = Cl_decoupled / win_binned
+
+            
+            Cl_cluster = Cl_total - Cshot_delta
+
+            np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_cluster.npy"), np.vstack((ell_binned, Cl_cluster)))    
+            np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_total.npy"),   np.vstack((ell_binned, Cl_total)))
+            metadata["Cshot_delta"] = float(Cshot_delta)
+            metadata["Cl_lmin"] = int(l_min)
+            metadata["Cl_lmax"] = int(l_max)
+            metadata["bin_width"] = int(bin_width)
+            metadata["ell_binned"] = ell_binned.tolist()  # optional, for matching ML input
 
 
-            Wl_full = hp.pixwin(NSIDE, lmax=int(l_max))
-            Bl_full = hp.gauss_beam(sigma_beam, lmax=int(l_max))
-            window_total_binned = binning.bin_cell((Wl_full * Bl_full)**2)[0]
-
-
-            Cl_corr = cl_decoupled[0] - C_ell_shot
-            Cl_deconv = Cl_corr / window_total_binned
-            Cl_final = Cl_deconv + C_ell_shot
-
-            np.save(cl_save_path, np.vstack((ell_binned, Cl_final)))
-            print(f"Saved Cl to {cl_save_path}")
+            meta_out_path = os.path.join(sim_output_folder, f"{shell_name}_Cl_meta.json")
+            with open(meta_out_path, "w") as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
 
             plt.figure(figsize=(8,6))
-            plt.plot(ell_binned, Cl_final, lw=1.5, label=f"sim{folder_num}_{shell_name}")
+            plt.plot(ell_binned, Cl_cluster+ 1e-3, lw=1.5, label=f"sim{folder_num}_{shell_name}")
             plt.xscale("log")
             plt.yscale("log")
             plt.xlabel(r"Multipole $\ell$")
