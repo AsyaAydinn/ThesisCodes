@@ -55,7 +55,7 @@ latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
 
 all_folders = sorted([
     f for f in os.listdir(base_input)
-    if f.isdigit() and 201 <= int(f) <= 400
+    if f.isdigit() and 0 <= int(f) <= 2000
 ], key=int)
 
 
