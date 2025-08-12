@@ -1,4 +1,4 @@
-import os
+fimport os
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
@@ -10,7 +10,7 @@ import json
 NSIDE = 512
 sigma_beam = 0.0004
 origin = np.array([0.0, 0.0, 0.0])
-base_input = "Quijote/latin_hypercube_hr/"
+base_input = "/Quijote/latin_hypercube_hr/"
 latin_hypercube_file = "Quijote/latin_hypercube_params.txt"
 output_base = "/simulations/"
 z = 1
@@ -55,7 +55,7 @@ latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
 
 all_folders = sorted([
     f for f in os.listdir(base_input)
-    if f.isdigit() and 1001 <= int(f) <= 1200
+    if f.isdigit() and 0 <= int(f) <= 2000
 ], key=int)
 
 
@@ -96,6 +96,9 @@ for folder in all_folders:
             mass_shell = mass[shell_mask]
             M_HI_vals = M_HI(mass_shell, z, Omega_m, f_H_c)
 
+            
+            
+
             x, y, zc = pos_shell.T
             theta = np.arccos(zc / np.linalg.norm(pos_shell, axis=1))
             phi = np.arctan2(y, x)
@@ -129,6 +132,7 @@ for folder in all_folders:
             Npix = hp.nside2npix(NSIDE)
            
 
+            mass_mean_M_HI = M_HI_vals.mean()
             mass_mean = mass_shell.mean()
             mass_var  = mass_shell.var()
             N_halos   = len(mass_shell)
@@ -141,10 +145,10 @@ for folder in all_folders:
             Tb_logsafe = np.where(Tb_smooth < 5e-4, 5e-4, Tb_smooth)
 
             
-            mean_Tb  = Tb_smooth[patch_mask].mean()
+            mean_Tb  = Tb_fullsky[patch_mask].mean()
 
             delta_Tb_fullsky = np.full(Npix, hp.UNSEEN)
-            delta_Tb_fullsky[patch_mask] = (Tb_smooth[patch_mask] - mean_Tb) / mean_Tb
+            delta_Tb_fullsky[patch_mask] = (Tb_fullsky[patch_mask] - mean_Tb) / mean_Tb
             delta_Tb_map = hp.ma(delta_Tb_fullsky)
             delta_Tb_map.mask = ~patch_mask 
             
@@ -158,7 +162,7 @@ for folder in all_folders:
             plot_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.png"
             fits_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.fits"
             
-            title = f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Ωₘ={Omega_m:.18f}, Ω_b={Omega_b:.18f}, h={h:.18f}, z={z:.1f}"
+            title = f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.18f}, Omega_b={Omega_b:.18f}, h={h:.18f}, z={z:.1f}"
             hp.mollview(Tb_logsafe, cbar=False, title=title,
                         unit='mK', cmap='plasma', min=5e-4, max=1e-2)
 
@@ -176,17 +180,18 @@ for folder in all_folders:
             plt.close()
             shell_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}"
             fits_path = os.path.join(fits_dir, f"{shell_name}.fits")
-            hp.write_map(fits_path, delta_Tb_map, overwrite=True)
+            hp.write_map(fits_path, Tb_fullsky, overwrite=True)
            
             metadata = dict(
                 shell_in=float(shell_in),
                 shell_out=float(shell_out),
                 mass_mean=float(mass_mean),
+                mass_mean_M_HI=float(mass_mean_M_HI),
                 mass_var=float(mass_var),
                 N_halos=int(N_halos),
                 f_sky=float(f_sky),
                 mean_Tb=float(mean_Tb),
-                sigma_beam=float(sigma_beam)
+                sigma_beam=float(sigma_beam)          
             )
 
 
