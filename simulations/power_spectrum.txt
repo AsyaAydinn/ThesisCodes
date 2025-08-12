@@ -9,8 +9,8 @@ NSIDE = 512
 bin_width = 6
 
 
-input_root = "####/simulations/fits"
-output_root ="####/simulations/power_spectrum"
+input_root = "#####/simulations/fits"
+output_root = "#####/simulations/power_spectrum"
 os.makedirs(output_root, exist_ok=True)
 
 
@@ -89,16 +89,27 @@ for folder_num in range(0, 2000):
 
             np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_cluster.npy"), np.vstack((ell_binned, Cl_cluster)))    
             np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_total.npy"),   np.vstack((ell_binned, Cl_total)))
-            metadata["Cshot_delta"] = float(Cshot_delta)
-            metadata["Cl_lmin"] = int(l_min)
-            metadata["Cl_lmax"] = int(l_max)
-            metadata["bin_width"] = int(bin_width)
-            metadata["ell_binned"] = ell_binned.tolist()  # optional, for matching ML input
+            
+            new_metadata = {
+                "original_meta_path": meta_path,
+                "Cshot_delta": float(Cshot_delta),
+                "Cl_lmin": int(l_min),
+                "Cl_lmax": int(l_max),
+                "bin_width": int(bin_width),
+                "ell_binned": ell_binned.tolist(),
+                "mass_var_M_HI": mass_var_M_HI,
+                "mass_mean_M_HI": mass_mean_M_HI,
+                "mass_mean": mass_mean,
+                "mass_var": mass_var,
+                "N_halos": N_halos,
+                "mean_Tb": mean_Tb,
+                "f_sky": f_sky,
+            }
 
 
             meta_out_path = os.path.join(sim_output_folder, f"{shell_name}_Cl_meta.json")
             with open(meta_out_path, "w") as f:
-                json.dump(metadata, f, indent=2, sort_keys=True)
+                json.dump(new_metadata, f, indent=2, sort_keys=True)
 
             plt.figure(figsize=(8,6))
             plt.plot(ell_binned, Cl_cluster+ 1e-3, lw=1.5, label=f"sim{folder_num}_{shell_name}")
