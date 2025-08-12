@@ -18,7 +18,7 @@ shell_out = shell_in + shell_thickness
 
 latin_hypercube_file = "#####/Quijote/latin_hypercube_params.txt"
 latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
-data = np.loadtxt('/project/ag-weller/Asya.Aydin/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
+data = np.loadtxt('####/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
 folder_num = 0
 Omega_m, Omega_b, h, n_s, sigma_8 = latin_data[folder_num]
 Omega_L = 1 - Omega_m
