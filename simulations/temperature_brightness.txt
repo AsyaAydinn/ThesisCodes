@@ -1,4 +1,4 @@
-fimport os
+import os
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
@@ -8,11 +8,11 @@ from astropy.io import fits
 import json
 
 NSIDE = 512
-sigma_beam = 0.0004
+sigma_beam = 0.004
 origin = np.array([0.0, 0.0, 0.0])
-base_input = "/Quijote/latin_hypercube_hr/"
-latin_hypercube_file = "Quijote/latin_hypercube_params.txt"
-output_base = "/simulations/"
+base_input = "######/Quijote/latin_hypercube_hr/"
+latin_hypercube_file = "######//Quijote/latin_hypercube_params.txt"
+output_base = "######/simulations/"
 z = 1
 
 shell_start = 0.0
@@ -21,7 +21,7 @@ shell_thickness = 30.0
 shell_edges = np.arange(shell_start, shell_end, shell_thickness)
 
 Y_p = 0.24
-alpha = 0.9
+alpha = 0.3
 beta = -0.58
 v_c0 = 10**1.56
 Msun_to_kg = 1.988e30
@@ -135,6 +135,8 @@ for folder in all_folders:
             mass_mean_M_HI = M_HI_vals.mean()
             mass_mean = mass_shell.mean()
             mass_var  = mass_shell.var()
+            mass_var_M_HI  = M_HI_vals.var()
+    
             N_halos   = len(mass_shell)
 
             Tb = Tb_pre * ((1 + z)**2 / Hz) * rho_HI* 1e3
@@ -180,7 +182,11 @@ for folder in all_folders:
             plt.close()
             shell_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}"
             fits_path = os.path.join(fits_dir, f"{shell_name}.fits")
-            hp.write_map(fits_path, Tb_fullsky, overwrite=True)
+            hp.write_map(fits_path, [Tb_fullsky.astype(np.float32), delta_Tb_fullsky.astype(np.float32)],
+            column_names=['TB_mK','DTB'],
+            dtype=np.float32,
+            overwrite=True
+        )
            
             metadata = dict(
                 shell_in=float(shell_in),
@@ -188,6 +194,7 @@ for folder in all_folders:
                 mass_mean=float(mass_mean),
                 mass_mean_M_HI=float(mass_mean_M_HI),
                 mass_var=float(mass_var),
+                mass_var_M_HI=float(mass_var_M_HI),
                 N_halos=int(N_halos),
                 f_sky=float(f_sky),
                 mean_Tb=float(mean_Tb),
