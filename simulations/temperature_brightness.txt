@@ -1,27 +1,30 @@
-import os
 import numpy as np
 import healpy as hp
-import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
-from scipy.constants import h as h_planck, c, k, physical_constants
-from astropy.io import fits
-import json
+import matplotlib.pyplot as plt 
+import pandas as pd
+from astropy.coordinates import CartesianRepresentation, SkyCoord
+import astropy.units as u
 
+from scipy.constants import h as h_planck, c, k, physical_constants
 NSIDE = 512
 sigma_beam = 0.004
-origin = np.array([0.0, 0.0, 0.0])
-base_input = "######/Quijote/latin_hypercube_hr/"
-latin_hypercube_file = "######//Quijote/latin_hypercube_params.txt"
-output_base = "######/simulations/"
 z = 1
+Msun_to_kg = 1.988e30   
+Mpc_to_m = 3.086e22      
+      
+shell_thickness = 30.0 
+shell_in = 600.0       
+shell_out = shell_in + shell_thickness        
 
-shell_start = 0.0
-shell_end = 1000.0
-shell_thickness = 30.0
-shell_edges = np.arange(shell_start, shell_end, shell_thickness)
+latin_hypercube_file = "#####/Quijote/latin_hypercube_params.txt"
+latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
+data = np.loadtxt('/project/ag-weller/Asya.Aydin/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
+folder_num = 0
+Omega_m, Omega_b, h, n_s, sigma_8 = latin_data[folder_num]
+Omega_L = 1 - Omega_m
 
 Y_p = 0.24
-alpha = 0.3
+alpha = 0.9    
 beta = -0.58
 v_c0 = 10**1.56
 Msun_to_kg = 1.988e30
@@ -31,10 +34,7 @@ f21 = 1.4204065e9
 m_p = physical_constants['proton mass'][0]
 k_b = k
 
-os.makedirs(os.path.join(output_base, "brightness_temp"), exist_ok=True)
-os.makedirs(os.path.join(output_base, "fits"), exist_ok=True)
-
-
+# Eq. 2.23  delta v is 200 
 def v_circ(M, z, Omega_m):
     factor = (200 * Omega_m / 24.4)**(1 / 6)
     return 96.6 * factor * (((1 + z) / 3.3)**0.5) * (M / 1e11)**(1 / 3)
@@ -43,171 +43,97 @@ def M_HI(M, z, Omega_m, f_H_c):
     return alpha * f_H_c * M * (M / 1e11)**beta * np.exp(-(v_c0 / v_circ(M, z, Omega_m))**3)
 
 
-def load_latin_hypercube_params(filepath):
-    try:
-        return np.loadtxt(filepath, comments="#")  # skip comment lines
-    except Exception as e:
-        print(f"Error loading Latin hypercube params: {e}")
-        return None
+from matplotlib.colors import LogNorm
 
+Omega_L = 1 - Omega_m
+f_H_c = (1 - Y_p) * Omega_b / Omega_m
+H0 = 100 * h *1e3 / Mpc_to_m    #m /s/m
+Hz = H0  * np.sqrt(Omega_m * (1 + z)**3 + Omega_L)   #
+Tb_pre = (3 * h_planck * c**3 * A10) / (32 * np.pi * k_b * f21**2 * m_p)  # K·m^3·kg^-1·s^-1
 
-latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
+pos = data[:, 1:4] / h
+mass = data[:, 7] / h
+r = np.linalg.norm(pos, axis=1)
 
-all_folders = sorted([
-    f for f in os.listdir(base_input)
-    if f.isdigit() and 0 <= int(f) <= 2000
-], key=int)
-
-
-for folder in all_folders:
-    halo_file = os.path.join(base_input, folder, "halos2.txt")
-    if not os.path.exists(halo_file):
-        continue
-    print(f"\nProcessing sim {folder}")
-
-    try:
-        folder_num = int(folder)
-        param_index = folder_num
-
-
-        if param_index >= latin_data.shape[0]:
-            print(f"Skipping {folder}: param index {param_index} out of bounds.")
-            continue
-
-        Omega_m, Omega_b, h, n_s, sigma_8 = latin_data[param_index]
-        Omega_L = 1 - Omega_m
-        f_H_c = (1 - Y_p) * Omega_b / Omega_m
-        H0 = 100 * h *1e3 / Mpc_to_m    #m /s/m
-        Hz = H0  * np.sqrt(Omega_m * (1 + z)**3 + Omega_L)   #
-        Tb_pre = (3 * h_planck * c**3 * A10) / (32 * np.pi * k_b * f21**2 * m_p)  # K·m^3·kg^-1·s^-1
-
-        data = np.loadtxt(halo_file, skiprows=6)
-        pos = data[:, 1:4] / h
-        mass = data[:, 7] / h
-        r = np.linalg.norm(pos, axis=1)
-
-        for shell_in in shell_edges:
-            shell_out = shell_in + shell_thickness
-            shell_mask = (r >= shell_in) & (r < shell_out)
-            if np.sum(shell_mask) == 0:
-                continue
-
-            pos_shell = pos[shell_mask]
-            mass_shell = mass[shell_mask]
-            M_HI_vals = M_HI(mass_shell, z, Omega_m, f_H_c)
-
-            
-            
-
-            x, y, zc = pos_shell.T
-            theta = np.arccos(zc / np.linalg.norm(pos_shell, axis=1))
-            phi = np.arctan2(y, x)
-            phi = np.where(phi < 0, phi + 2 * np.pi, phi)
-            theta1, theta2 = 0, np.pi/2     # colatitude: 0-90 deg
-            phi1, phi2     = 0, np.pi/2
-
-            pix = hp.ang2pix(NSIDE, theta, phi)
-            Npix = hp.nside2npix(NSIDE)
-        
-            mass_map = np.bincount(pix, weights=M_HI_vals, minlength=Npix)
-            theta_p, phi_p = hp.pix2ang(NSIDE, np.arange(Npix))
-            patch_mask = ((theta_p >= theta1) & (theta_p <= theta2) &
-                          (phi_p   >= phi1)   & (phi_p   <= phi2))
-            f_sky = patch_mask.mean()
-            Npix_nonzero_patch = (mass_map[patch_mask] > 0).sum()
-            mass_map_patch = mass_map[patch_mask]  
-
-
-            r_comoving = shell_in + shell_thickness / 2
-            r_m = r_comoving * Mpc_to_m
-            Npix_patch = patch_mask.sum()
-            
-            shell_volume =(4 * np.pi * r_m**2 * (shell_thickness * Mpc_to_m)) / ((1 + z)**3 ) *f_sky 
-            vol_pix = shell_volume / Npix_patch
-
-
-            mass_map_kg = mass_map_patch * Msun_to_kg
-            rho_HI = mass_map_kg / vol_pix
-            mask_float = patch_mask.astype(float)
-            Npix = hp.nside2npix(NSIDE)
-           
-
-            mass_mean_M_HI = M_HI_vals.mean()
-            mass_mean = mass_shell.mean()
-            mass_var  = mass_shell.var()
-            mass_var_M_HI  = M_HI_vals.var()
+shell_mask = (r >= shell_in) & (r < shell_out)
     
-            N_halos   = len(mass_shell)
+pos_shell = pos[shell_mask]
+mass_shell = mass[shell_mask]
+M_HI_vals = M_HI(mass_shell, z, Omega_m, f_H_c)
 
-            Tb = Tb_pre * ((1 + z)**2 / Hz) * rho_HI* 1e3
-            Tb_fullsky = np.full(Npix, hp.UNSEEN) 
-            Tb_fullsky[patch_mask] = Tb      
+x, y, zc = pos_shell.T
+theta = np.arccos(zc / np.linalg.norm(pos_shell, axis=1))
+phi = np.arctan2(y, x)
+phi = np.where(phi < 0, phi + 2 * np.pi, phi)
 
-            Tb_smooth = hp.smoothing(Tb_fullsky, sigma=sigma_beam)
-            Tb_logsafe = np.where(Tb_smooth < 5e-4, 5e-4, Tb_smooth)
+pix = hp.ang2pix(NSIDE, theta, phi)
+Npix = hp.nside2npix(NSIDE)
+mass_map = np.bincount(pix, weights=M_HI_vals, minlength=Npix)
 
-            
-            mean_Tb  = Tb_fullsky[patch_mask].mean()
+theta1, theta2 = 0, np.pi/2   
+phi1, phi2     = 0, np.pi/2    
 
-            delta_Tb_fullsky = np.full(Npix, hp.UNSEEN)
-            delta_Tb_fullsky[patch_mask] = (Tb_fullsky[patch_mask] - mean_Tb) / mean_Tb
-            delta_Tb_map = hp.ma(delta_Tb_fullsky)
-            delta_Tb_map.mask = ~patch_mask 
-            
+theta_p, phi_p = hp.pix2ang(NSIDE, np.arange(Npix))
+patch_mask = ((theta_p >= theta1) & (theta_p <= theta2) &
+              (phi_p   >= phi1)   & (phi_p   <= phi2))
+f_sky = patch_mask.mean()
 
-            
-            plot_dir = os.path.join(output_base, "brightness_temp", folder)
-            fits_dir = os.path.join(output_base, "fits", folder)
-            os.makedirs(plot_dir, exist_ok=True)
-            os.makedirs(fits_dir, exist_ok=True)
+Npix_nonzero_patch = (mass_map[patch_mask] > 0).sum()
+occ_patch          = Npix_nonzero_patch / patch_mask.sum()       #how many pxel has halos
 
-            plot_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.png"
-            fits_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.fits"
-            
-            title = f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.18f}, Omega_b={Omega_b:.18f}, h={h:.18f}, z={z:.1f}"
-            hp.mollview(Tb_logsafe, cbar=False, title=title,
-                        unit='mK', cmap='plasma', min=5e-4, max=1e-2)
+mass_map_patch = mass_map[patch_mask]                    #to be sure i masked the empty ones
+r_comoving = (shell_in + shell_thickness / 2  )
+r_m = r_comoving * Mpc_to_m
+Npix_patch = patch_mask.sum()
+             #number of pixel in my region
 
-            fig = plt.gcf()
-            ax = plt.gca()
-            image = ax.get_images()[0]
-            image.set_norm(LogNorm(vmin=5e-4, vmax=1e-2))
-            cbar = fig.colorbar(image, ax=ax, orientation='horizontal', pad=0.05, fraction=0.05)
-            cbar.set_label("Brightness Temperature [mK] (log scale)")
+shell_volume =(4 * np.pi * r_m**2 * (shell_thickness * Mpc_to_m)) / ((1 + z)**3 ) *f_sky 
+vol_pix = shell_volume / Npix_patch
 
 
+mass_map_kg = mass_map_patch * Msun_to_kg
+mass_mean = mass_shell.mean()
+mass_mean_HI = M_HI_vals.mean()
+mass_var_HI = M_HI_vals.var() 
+mass_var  = mass_shell.var()
+N_halos   = len(mass_shell)
+rho_HI = mass_map_kg / vol_pix      
 
-            plt.savefig(os.path.join(plot_dir, plot_name))
-            plt.clf()
-            plt.close()
-            shell_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}"
-            fits_path = os.path.join(fits_dir, f"{shell_name}.fits")
-            hp.write_map(fits_path, [Tb_fullsky.astype(np.float32), delta_Tb_fullsky.astype(np.float32)],
-            column_names=['TB_mK','DTB'],
-            dtype=np.float32,
-            overwrite=True
-        )
-           
-            metadata = dict(
-                shell_in=float(shell_in),
-                shell_out=float(shell_out),
-                mass_mean=float(mass_mean),
-                mass_mean_M_HI=float(mass_mean_M_HI),
-                mass_var=float(mass_var),
-                mass_var_M_HI=float(mass_var_M_HI),
-                N_halos=int(N_halos),
-                f_sky=float(f_sky),
-                mean_Tb=float(mean_Tb),
-                sigma_beam=float(sigma_beam)          
-            )
+Tb = Tb_pre * ((1 + z)**2 / Hz) * rho_HI* 1e3     #not full sky
+Tb_fullsky = np.full(Npix, hp.UNSEEN)     #created full sky
+Tb_fullsky[patch_mask] = Tb                       #created mask and put data in there
+
+Tb_smooth = hp.smoothing(Tb_fullsky, sigma=sigma_beam)    #smoothed over full sky
+mean_Tb  = Tb_smooth[patch_mask].mean()
+Tb_logsafe = np.where(Tb_smooth < 5e-4, 5e-4, Tb_smooth)
 
 
-            meta_path = os.path.join(fits_dir, f"{shell_name}_meta.json")
-            with open(meta_path, "w") as f:
-                json.dump(metadata, f, indent=2, sort_keys=True)
+delta_Tb_fullsky = np.full(Npix, hp.UNSEEN)   #full smoothed sky- our regions mean / ...  (still full sky)
+delta_Tb_fullsky[patch_mask] = (Tb_smooth[patch_mask]- mean_Tb) / mean_Tb
 
-            mask_path = os.path.join(fits_dir, f"{shell_name}_mask.fits")
-            hp.write_map(mask_path, patch_mask.astype(np.float32), overwrite=True)
-            
-    except Exception as e:
-        print(f"Error in sim {folder}: {e}")
+
+delta_Tb_map       = hp.ma(delta_Tb_fullsky)    #I want to work with this map, but I want some pixels to be ignored
+delta_Tb_map.mask  = ~patch_mask        # telling code that where pixels should be masked
+#so when i compute power spectrum, healpy will skip the masked pixels and calculate Cl for only my patch
+
+hp.mollview(Tb_logsafe, cbar=True,
+            title=f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.3f}, Omega_b={Omega_b:.3f}, h={h:.3f}, z={z:.1f}",
+            unit='mK', cmap='plasma', min=5e-4, max=1e-2)
+fig = plt.gcf()
+ax = plt.gca()
+image = ax.get_images()[0]
+image.set_norm(LogNorm(vmin=5e-4, vmax=1e-2))
+cbar = fig.colorbar(image, ax=ax, orientation='horizontal', pad=0.05, fraction=0.05)
+cbar.set_label("Brightness Temperature [mK] (log scale)")
+
+print("Mean T_b [mK]:", mean_Tb)
+print("Mean delta T_b [mK]:", np.mean(delta_Tb_fullsky[patch_mask]))
+print("RMS delta T_b:", np.std(delta_Tb_fullsky[patch_mask]))
+print("shell_volume [m^3]:", shell_volume)
+print("mean rho_HI [kg/m^3]:", np.mean(rho_HI))
+
+print("f_Sky:",f_sky)
+print("mass_mean_halo:", mass_mean)
+print("mass_var_halo:",mass_var)
+print("mass_mean_M_HI:", mass_mean_HI)
+print("mass_var_M_HI::",mass_var_HI)
