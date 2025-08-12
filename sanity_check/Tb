@@ -16,7 +16,7 @@ shell_thickness = 30.0
 shell_in = 600.0       
 shell_out = shell_in + shell_thickness        
 
-latin_hypercube_file = "/project/ag-weller/Kai.Lehman/Quijote/latin_hypercube_params.txt"
+latin_hypercube_file = "#####/Quijote/latin_hypercube_params.txt"
 latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
 data = np.loadtxt('/project/ag-weller/Asya.Aydin/Quijote/latin_hypercube_hr/0/halos2.txt', skiprows=6)
 folder_num = 0
@@ -116,7 +116,7 @@ delta_Tb_map       = hp.ma(delta_Tb_fullsky)    #I want to work with this map, b
 delta_Tb_map.mask  = ~patch_mask        # telling code that where pixels should be masked
 #so when i compute power spectrum, healpy will skip the masked pixels and calculate Cl for only my patch
 
-hp.mollview(delta_Tb_fullsky, cbar=True,
+hp.mollview(Tb_logsafe, cbar=True,
             title=f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.3f}, Omega_b={Omega_b:.3f}, h={h:.3f}, z={z:.1f}",
             unit='mK', cmap='plasma', min=5e-4, max=1e-2)
 fig = plt.gcf()
@@ -135,5 +135,5 @@ print("mean rho_HI [kg/m^3]:", np.mean(rho_HI))
 print("f_Sky:",f_sky)
 print("mass_mean_halo:", mass_mean)
 print("mass_var_halo:",mass_var)
-print("mass_mean_M_HI:", mass_mean)
-print("mass_var_M_HI::",mass_var)
+print("mass_mean_M_HI:", mass_mean_HI)
+print("mass_var_M_HI::",mass_var_HI)
