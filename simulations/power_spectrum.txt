@@ -1,128 +1,178 @@
-import os
+import os, re, hashlib
 import numpy as np
 import healpy as hp
-import json
 import pymaster as nmt
-import matplotlib.pyplot as plt
 
-NSIDE = 512
-bin_width = 6
+NSIDE      = 512
+LMAX       = 3*NSIDE - 1
+BIN_WIDTH  = 6
+INPUT_ROOT = "/project/ag-weller/Asya.Aydin/simulations/fits/"
+OUTPUT_ROOT= "/project/ag-weller/Asya.Aydin/simulations/power_spectrum"
+SIM_MIN, SIM_MAX = 879,1000  
+import json
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+def mask_key(mk: np.ndarray) -> str:
+    return hashlib.sha1(mk.view(np.uint8)).hexdigest()
 
 
-input_root = "#####/simulations/fits"
-output_root = "#####/simulations/power_spectrum"
-os.makedirs(output_root, exist_ok=True)
+shell_re = re.compile(r"Tb_shell(\d+)_(\d+)\.fits$")
+binning = nmt.NmtBin.from_lmax_linear(lmax=LMAX, nlb=BIN_WIDTH)
+ell_b   = binning.get_effective_ells()
+
+workspace_cache = {} 
+saved_ell_once  = False
+import matplotlib.pyplot as plt  # move to top so we can reuse
+
+def fsky_eff(mask: np.ndarray) -> float:
+    """Effective f_sky for Knox = <mask^2> over the full sky."""
+    return float(np.mean(mask**2))
+
+def knox_sigma(ell_b: np.ndarray, Cb: np.ndarray, bin_width: int, fsky: float) -> np.ndarray:
+    """
+    Knox formula for bandpower variance on a masked sky (spin-0 auto):
+      Var(C_b) ≈ 2 / [(2ℓ_b+1) Δℓ f_sky] * (C_b + N_b)^2
+    Here we take N_b=0 (no extra noise term).
+    """
+    lb = np.maximum(ell_b, 1.0)  # avoid division by zero
+    var = 2.0 / ((2.0*lb + 1.0) * bin_width * max(fsky, 1e-6)) * (Cb**2)
+    return np.sqrt(var)
 
 
-for folder_num in range(0, 2000):
-    folder_path = os.path.join(input_root, str(folder_num))
-    if not os.path.isdir(folder_path):
+for folder in sorted(os.listdir(INPUT_ROOT), key=lambda x: int(x) if x.isdigit() else 10**9):
+    if not folder.isdigit():
+        continue
+    fid = int(folder)
+    if not (SIM_MIN <= fid <= SIM_MAX):
         continue
 
-    fits_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".fits") and "mask" not in f])
+    folder_path = os.path.join(INPUT_ROOT, folder)
+    if not os.path.isdir(folder_path):
+        continue
+    fits_files = []
+    for f in os.listdir(folder_path):
+        if not f.endswith(".fits") or "_mask" in f:
+            continue
+        m = shell_re.match(f)
+        if not m:
+            continue
+        shell_in  = int(m.group(1))
+        shell_out = int(m.group(2))
+        if (shell_in >= 240) and (shell_out <= 990):
+            fits_files.append((shell_in, shell_out, f))
+    fits_files.sort()
+    if not fits_files:
+        continue
+    
 
-    for fits_name in fits_files:
-        shell_name = fits_name.replace(".fits", "")
-        print(f"\nProcessing sim {folder_num}, shell {shell_name}")
-
-        try:
-            # Paths
-            fits_path = os.path.join(folder_path, f"{shell_name}.fits")
-            mask_path = os.path.join(folder_path, f"{shell_name}_mask.fits")
-            meta_path = os.path.join(folder_path, f"{shell_name}_meta.json")
-
-            sim_output_folder = os.path.join(output_root, str(folder_num))
-            os.makedirs(sim_output_folder, exist_ok=True)
-
-            cl_save_path = os.path.join(sim_output_folder, f"{shell_name}_Cl.npy")
-            cl_plot_path = os.path.join(sim_output_folder, f"{shell_name}_Cl.png")
+    out_dir = os.path.join(OUTPUT_ROOT, f"{fid}")
+    os.makedirs(out_dir, exist_ok=True)
 
 
-
-            Tb_map = hp.read_map(fits_path, field=0, verbose=False)   
-            DTb_map = hp.read_map(fits_path, field=1, verbose=False) 
+    for shell_in, shell_out, fname in fits_files:
+        fpath = os.path.join(folder_path, fname)
+        shell_name = fname[:-5]
+        TB_mK, DTB = hp.read_map(fpath, field=(0, 1), dtype=np.float64, verbose=False)
         
-            patch_mask = hp.read_map(mask_path, verbose=False).astype(bool)
-            DTb_map[~patch_mask] = 0.0
-            with open(meta_path, "r") as f:
-                metadata = json.load(f)
-
-            mass_var_M_HI = metadata["mass_var_M_HI"]
-            mass_mean_M_HI = metadata["mass_mean_M_HI"]
-            mass_mean = metadata["mass_mean"]
-            mass_var = metadata["mass_var"]
-            N_halos = metadata["N_halos"]
-            mean_Tb  = metadata["mean_Tb"]
-            f_sky   = metadata["f_sky"]
-
-            mean_w2 = mass_var_M_HI +mass_mean_M_HI**2
-            Cshot_delta = 4*np.pi * f_sky / N_halos * (mean_w2 / mass_mean_M_HI**2) 
-            mask = hp.read_map(mask_path, verbose=False).astype(bool)
-            mask_apo = nmt.mask_apodization(mask.astype(float), aposize=1.0, apotype="C1") 
+        meta_path = fpath.replace(".fits", "_meta.json")
+        with open(meta_path, "r") as _f:
+            meta = json.load(_f)
+        mean_Tb_mK = float(meta["mean_Tb"]) 
         
-            Npix = hp.nside2npix(NSIDE)
-            Omega_pix = 4 * np.pi / Npix
+        # --- read / build mask ---
+        mask_path = fpath.replace(".fits", "_mask.fits")
+        if not os.path.exists(mask_path):
+            mk = np.isfinite(TB_mK) & (TB_mK != hp.UNSEEN)
+            mask = mk.astype(np.float64)
+        else:
+            mask_raw = hp.read_map(mask_path, dtype=np.float64, verbose=False)
+            mask = np.where((mask_raw == hp.UNSEEN) | (mask_raw <= 0.0), 0.0, 1.0)
+
+        # NEW: apodize in either case
+        mask = nmt.mask_apodization(mask, aposize=1.0, apotype="C2")
+
+        # NEW: safety — require some sky
+        if (mask > 0).sum() < 10:
+            continue
+        # workspace by apodized mask
+        mkey = mask_key(mask.astype(np.float32))
+        if mkey in workspace_cache:
+            w = workspace_cache[mkey]
+        else:
+            f_tmp = nmt.NmtField(mask, [mask*0.0])  # single-field dummy
+            w = nmt.NmtWorkspace()
+            w.compute_coupling_matrix(f_tmp, f_tmp, binning)
+            workspace_cache[mkey] = w
+
+        # --- 1) DTB ---
+        # FIX: define dtb from DTB first, then clean & de-mean on the mask
+        dtb = DTB.copy()
+        dtb = np.where(np.isfinite(dtb), dtb, 0.0)
+        mval = (mask > 0) & np.isfinite(dtb)
+        dtb = dtb - (dtb[mval].mean() if np.any(mval) else 0.0)
+
+        f_dtb = nmt.NmtField(mask, [dtb])  # beam=None (no pixwin)
+        cl_coup_dtb = nmt.compute_coupled_cell(f_dtb, f_dtb)
+        cl_dtb = w.decouple_cell(cl_coup_dtb)[0]
+
+        # --- 2) TB (mean-sub) ---
+        tb = TB_mK.copy()
+        val = (tb != hp.UNSEEN) & np.isfinite(tb) & (mask > 0)
+        tb = np.where(val, tb - tb[val].mean(), 0.0)
+
+        f_tb = nmt.NmtField(mask, [tb])    # beam=None (no pixwin)
+        cl_coup_tb = nmt.compute_coupled_cell(f_tb, f_tb)
+        cl_tb = w.decouple_cell(cl_coup_tb)[0]
+
+        fsky = fsky_eff(mask)
+        sigC_dtb = knox_sigma(ell_b, cl_dtb, BIN_WIDTH, fsky)
+        sigC_tb  = knox_sigma(ell_b, cl_tb,  BIN_WIDTH, fsky)
+        
+        Dl_dtb = ell_b*(ell_b+1)*cl_dtb/(2*np.pi)
+        Dl_tb  = ell_b*(ell_b+1)*cl_tb /(2*np.pi)
+        Dlerr_dtb = ell_b*(ell_b+1)*sigC_dtb/(2*np.pi)
+        Dlerr_tb  = ell_b*(ell_b+1)*sigC_tb /(2*np.pi)
 
 
-            field = nmt.NmtField(mask_apo, [DTb_map], lmax=1024)
-            l_min = 5
-            bin_width = 6
-            l_max = 1024
-            ell_edges = np.arange(l_min, l_max + bin_width, bin_width)
+
+# (çizim yapmadan, sadece kaydetmek için)
 
 
-            binning = nmt.NmtBin.from_edges(ell_edges[:-1], ell_edges[1:])
+        np.savez_compressed(
+            os.path.join(out_dir, f"{shell_name}_cl_ml.npz"),
+            ell=ell_b, cl=cl_dtb, Dl=Dl_dtb,
+            field="DTB", nside=NSIDE, lmax=LMAX,
+            bin_width=BIN_WIDTH, shell_in=int(shell_in), shell_out=int(shell_out)
+        )
+        np.savez_compressed(
+            os.path.join(out_dir, f"{shell_name}_TB_cl_ml.npz"),
+            ell=ell_b, cl=cl_tb, Dl=Dl_tb,
+            field="TB_mK_minus_mean", nside=NSIDE, lmax=LMAX,
+            bin_width=BIN_WIDTH, shell_in=int(shell_in), shell_out=int(shell_out)
+        )
 
-            workspace = nmt.NmtWorkspace()
-            workspace.compute_coupling_matrix(field, field, binning)
+# --- quick plot: lines + Knox error bars (log-safe) ---
+# --- quick plot: TB (mean-sub, in mK) with Knox error bars ---
+        plt.figure(figsize=(5.8, 4.2), dpi=200)
 
-            Cl_decoupled = workspace.decouple_cell(nmt.compute_coupled_cell(field, field))[0]
-            ell_binned = binning.get_effective_ells()
-   
-            Wl = hp.pixwin(NSIDE, lmax=l_max)
-            win_binned = binning.bin_cell(Wl**2)[0]
-            win_binned = np.where(win_binned > 1e-12, win_binned, np.nan)
-            Cl_total = Cl_decoupled / win_binned
+        m = np.isfinite(Dl_tb) & np.isfinite(Dlerr_tb) & (Dl_tb > 0) & (Dlerr_tb > 0)
+        yerr_low  = np.minimum(Dlerr_tb[m], 0.99 * Dl_tb[m])   # avoid <=0 on log scale
+        yerr_high = Dlerr_tb[m]
 
-            
-            Cl_cluster = Cl_total - Cshot_delta
-
-            np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_cluster.npy"), np.vstack((ell_binned, Cl_cluster)))    
-            np.save(os.path.join(sim_output_folder, f"{shell_name}_Cl_total.npy"),   np.vstack((ell_binned, Cl_total)))
-            
-            new_metadata = {
-                "original_meta_path": meta_path,
-                "Cshot_delta": float(Cshot_delta),
-                "Cl_lmin": int(l_min),
-                "Cl_lmax": int(l_max),
-                "bin_width": int(bin_width),
-                "ell_binned": ell_binned.tolist(),
-                "mass_var_M_HI": mass_var_M_HI,
-                "mass_mean_M_HI": mass_mean_M_HI,
-                "mass_mean": mass_mean,
-                "mass_var": mass_var,
-                "N_halos": N_halos,
-                "mean_Tb": mean_Tb,
-                "f_sky": f_sky,
-            }
+        plt.errorbar(ell_b[m], Dl_tb[m],
+             yerr=np.vstack([yerr_low, yerr_high]),
+             fmt='o', ms=3, lw=1, capsize=2, 
+             label=r'$Gaussian errors')
 
 
-            meta_out_path = os.path.join(sim_output_folder, f"{shell_name}_Cl_meta.json")
-            with open(meta_out_path, "w") as f:
-                json.dump(new_metadata, f, indent=2, sort_keys=True)
+        plt.xscale("log"); plt.yscale("log")
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$D_\ell $  [mK$^2$]")
+        plt.grid(True, which='major', alpha=0.25)
+       
+        plt.title(f'{shell_name}  Δℓ={BIN_WIDTH} z= 1')
+        plt.legend(frameon=False, loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{shell_name}_Cl_binned.png"))
+        plt.close()
 
-            plt.figure(figsize=(8,6))
-            plt.plot(ell_binned, Cl_cluster+ 1e-3, lw=1.5, label=f"sim{folder_num}_{shell_name}")
-            plt.xscale("log")
-            plt.yscale("log")
-            plt.xlabel(r"Multipole $\ell$")
-            plt.ylabel(r"$C_\ell$")
-            plt.title(f"Power Spectrum: sim {folder_num}, {shell_name}")
-            plt.grid(True, which="both")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(cl_plot_path)
-            plt.close()
-
-        except Exception as e:
-            print(f"Error in sim {folder_num}, shell {shell_name}: {e}")
