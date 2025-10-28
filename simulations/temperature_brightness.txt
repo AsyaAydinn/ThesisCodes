@@ -8,20 +8,21 @@ from astropy.io import fits
 import json
 
 NSIDE = 512
-sigma_beam = 0.004
+
 origin = np.array([0.0, 0.0, 0.0])
-base_input = "####/Quijote/latin_hypercube_hr/"
-latin_hypercube_file = "####/Quijote/latin_hypercube_params.txt"
-output_base = "####/simulations/"
+base_input = "/scratch/a/A.Aydin/Quijote/latin_hypercube_hr/"
+latin_hypercube_file = "/project/ag-weller/Asya.Aydin/latin_hypercube_params.txt"
+output_base = "/project/ag-weller/Asya.Aydin/simulations"
 z = 1
 
 shell_start = 0.0
 shell_end = 1000.0
-shell_thickness = 30.0
+shell_thickness = 30.0      
 shell_edges = np.arange(shell_start, shell_end, shell_thickness)
 
+
 Y_p = 0.24
-alpha = 0.3
+alpha = 0.2
 beta = -0.58
 v_c0 = 10**1.56
 Msun_to_kg = 1.988e30
@@ -35,17 +36,19 @@ os.makedirs(os.path.join(output_base, "brightness_temp"), exist_ok=True)
 os.makedirs(os.path.join(output_base, "fits"), exist_ok=True)
 
 
-def v_circ(M, z, Omega_m):
-    factor = (200 * Omega_m / 24.4)**(1 / 6)
-    return 96.6 * factor * (((1 + z) / 3.3)**0.5) * (M / 1e11)**(1 / 3)
+def v_circ(M, z, Omega_m, h):
+    factor = (200 * Omega_m * h**2 / 24.4)**(1/6)
+    return 96.6 * factor * ((1+z)/3.3)**0.5 * (M / 1e11)**(1/3)
 
-def M_HI(M, z, Omega_m, f_H_c):
-    return alpha * f_H_c * M * (M / 1e11)**beta * np.exp(-(v_c0 / v_circ(M, z, Omega_m))**3)
 
+def M_HI(M, z, Omega_m, f_H_c, h):
+    mass_ratio = (M / (1e11/h))**beta   # Msun/h 
+    vc = v_circ(M / h, z, Omega_m, h)   # Msuna 
+    return alpha * f_H_c * M * mass_ratio * np.exp(-(v_c0 / vc)**3)
 
 def load_latin_hypercube_params(filepath):
     try:
-        return np.loadtxt(filepath, comments="#")  # skip comment lines
+        return np.loadtxt(filepath, comments="#") 
     except Exception as e:
         print(f"Error loading Latin hypercube params: {e}")
         return None
@@ -55,12 +58,12 @@ latin_data = np.loadtxt(latin_hypercube_file, comments="#", dtype=np.float64)
 
 all_folders = sorted([
     f for f in os.listdir(base_input)
-    if f.isdigit() and 0 <= int(f) <= 2000
+    if f.isdigit() and 501 <= int(f) <= 750
 ], key=int)
 
 
 for folder in all_folders:
-    halo_file = os.path.join(base_input, folder, "halos2.txt")
+    halo_file = os.path.join(base_input, folder, "halos.txt")
     if not os.path.exists(halo_file):
         continue
     print(f"\nProcessing sim {folder}")
@@ -79,83 +82,77 @@ for folder in all_folders:
         f_H_c = (1 - Y_p) * Omega_b / Omega_m
         H0 = 100 * h *1e3 / Mpc_to_m    #m /s/m
         Hz = H0  * np.sqrt(Omega_m * (1 + z)**3 + Omega_L)   #
-        Tb_pre = (3 * h_planck * c**3 * A10) / (32 * np.pi * k_b * f21**2 * m_p)  # K·m^3·kg^-1·s^-1
+        Tb_pre = (3 * h_planck * c**3 * A10) / (32  *np.pi * k_b * f21**2 * m_p)  # K·m^3·kg^-1·s^-1
 
         data = np.loadtxt(halo_file, skiprows=6)
-        pos = data[:, 1:4] / h
-        mass = data[:, 7] / h
-        r = np.linalg.norm(pos, axis=1)
+        pos = data[:, 1:4] #comov
+        mass = data[:, 7] #msun/h
+        Lbox = 1000.0  # Mpc/h
+        pos_corner = pos    
+        r_all= np.linalg.norm(pos_corner, axis=1)
+        
+
+        Npix = hp.nside2npix(NSIDE)
+        theta_p, phi_p = hp.pix2ang(NSIDE, np.arange(Npix))
+        octant_mask = (theta_p <= np.pi/2) & (phi_p <= np.pi/2)
+        Npix_octant = int(octant_mask.sum())
+        f_sky        = float(Npix_octant / Npix)
 
         for shell_in in shell_edges:
-            shell_out = shell_in + shell_thickness
-            shell_mask = (r >= shell_in) & (r < shell_out)
+            shell_out = min(shell_in + shell_thickness, shell_end)
+            shell_mask = (r_all >= shell_in) & (r_all < shell_out)
             if np.sum(shell_mask) == 0:
                 continue
 
-            pos_shell = pos[shell_mask]
+            pos_shell_corner = pos_corner[shell_mask]
             mass_shell = mass[shell_mask]
-            M_HI_vals = M_HI(mass_shell, z, Omega_m, f_H_c)
+            r_shell = np.linalg.norm(pos_shell_corner, axis =1 )
 
-            
-            
-
-            x, y, zc = pos_shell.T
-            theta = np.arccos(zc / np.linalg.norm(pos_shell, axis=1))
+            x, y, zc = pos_shell_corner.T
+            cosang = np.clip(zc / r_shell, -1.0, 1.0)  
+            theta = np.arccos(cosang)
             phi = np.arctan2(y, x)
             phi = np.where(phi < 0, phi + 2 * np.pi, phi)
-            theta1, theta2 = 0, np.pi/2     # colatitude: 0-90 deg
-            phi1, phi2     = 0, np.pi/2
-
-            pix = hp.ang2pix(NSIDE, theta, phi)
-            Npix = hp.nside2npix(NSIDE)
-        
-            mass_map = np.bincount(pix, weights=M_HI_vals, minlength=Npix)
-            theta_p, phi_p = hp.pix2ang(NSIDE, np.arange(Npix))
-            patch_mask = ((theta_p >= theta1) & (theta_p <= theta2) &
-                          (phi_p   >= phi1)   & (phi_p   <= phi2))
-            f_sky = patch_mask.mean()
-            Npix_nonzero_patch = (mass_map[patch_mask] > 0).sum()
-            mass_map_patch = mass_map[patch_mask]  
-
-
-            r_comoving = shell_in + shell_thickness / 2
-            r_m = r_comoving * Mpc_to_m
-            Npix_patch = patch_mask.sum()
-            
-            shell_volume =(4 * np.pi * r_m**2 * (shell_thickness * Mpc_to_m)) / ((1 + z)**3 ) *f_sky 
-            vol_pix = shell_volume / Npix_patch
-
-
-            mass_map_kg = mass_map_patch * Msun_to_kg
-            rho_HI = mass_map_kg / vol_pix
-            mask_float = patch_mask.astype(float)
-            Npix = hp.nside2npix(NSIDE)
            
+            pix = hp.ang2pix(NSIDE, theta, phi)
 
-            mass_mean_M_HI = M_HI_vals.mean()
-            mass_mean = mass_shell.mean()
-            mass_var  = mass_shell.var()
-            mass_var_M_HI  = M_HI_vals.var()
-    
-            N_halos   = len(mass_shell)
-
-            Tb = Tb_pre * ((1 + z)**2 / Hz) * rho_HI* 1e3
-            Tb_fullsky = np.full(Npix, hp.UNSEEN) 
-            Tb_fullsky[patch_mask] = Tb      
-
-            Tb_smooth = hp.smoothing(Tb_fullsky, sigma=sigma_beam)
-            Tb_logsafe = np.where(Tb_smooth < 5e-4, 5e-4, Tb_smooth)
 
             
-            mean_Tb  = Tb_fullsky[patch_mask].mean()
+            M_HI_vals = M_HI(mass_shell, z, Omega_m, f_H_c,h)      ## unit msun/h 
+        
+            mass_map = np.bincount(pix, weights=M_HI_vals, minlength=Npix).astype(np.float64)  # mass_shell in Msun/h
+            mass_map[~octant_mask] = 0.0
+            r_center = 0.5 * (shell_in + shell_out)  #
+            dr = (shell_out - shell_in)
 
-            delta_Tb_fullsky = np.full(Npix, hp.UNSEEN)
-            delta_Tb_fullsky[patch_mask] = (Tb_fullsky[patch_mask] - mean_Tb) / mean_Tb
-            delta_Tb_map = hp.ma(delta_Tb_fullsky)
-            delta_Tb_map.mask = ~patch_mask 
-            
 
+            shell_volume = (4*np.pi * r_center**2 * dr) * f_sky / (1 + z)**3    #proper volume
+            vol_pix = shell_volume / Npix_octant       
+            vol_pix_m3 = vol_pix * (Mpc_to_m**3) / (h**3)    
+
+            mass_map_kg = mass_map* Msun_to_kg / h   # [kg] 
+            rho_HI = mass_map_kg / vol_pix_m3 # [kg/m^3], comoving
+            Tb = Tb_pre * ((1 + z)**2 / Hz) * rho_HI* 1e3   #milikelvin 
             
+            
+            mean_Tb = Tb[octant_mask].mean()
+            delta_Tb = np.zeros_like(Tb, dtype=np.float32)      
+            delta_Tb[octant_mask] = (Tb[octant_mask] - mean_Tb) / mean_Tb
+            Tb_map = Tb.astype(np.float32)
+            delta_map = delta_Tb.astype(np.float32)
+            Tb_map[octant_mask] = Tb[octant_mask].astype(np.float32)
+            delta_map[octant_mask] = delta_Tb[octant_mask].astype(np.float32)
+
+
+
+            M_HI_tot_Msun_h = float(M_HI_vals.sum())         
+            M_HI_tot_kg     = M_HI_tot_Msun_h * Msun_to_kg / h # kg
+            shell_volume_m3 = shell_volume * (Mpc_to_m**3) / (h**3)  
+            rho_HI_mean = float(M_HI_tot_kg / shell_volume_m3)       
+
+            N_halos_shell   = int(len(mass_shell))
+
+
             plot_dir = os.path.join(output_base, "brightness_temp", folder)
             fits_dir = os.path.join(output_base, "fits", folder)
             os.makedirs(plot_dir, exist_ok=True)
@@ -163,26 +160,39 @@ for folder in all_folders:
 
             plot_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.png"
             fits_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}.fits"
-            
-            title = f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.18f}, Omega_b={Omega_b:.18f}, h={h:.18f}, z={z:.1f}"
-            hp.mollview(Tb_logsafe, cbar=False, title=title,
-                        unit='mK', cmap='plasma', min=5e-4, max=1e-2)
+
+
+
+            Tb_plot = Tb_map.copy()
+            valid = (Tb_plot != hp.UNSEEN)
+            p1, p99 = np.percentile(Tb_plot[valid], [1, 99]) 
+
+            Tb_plot[valid] = np.clip(Tb_plot[valid], 5e-4, None)
+            fwhm = np.radians(0.5)  # 0.5° beam
+            Tb_plot = hp.smoothing(Tb_plot, fwhm=fwhm, verbose=False)
+            title = f"T_b log (shell {shell_in:.0f}-{shell_out:.0f}) | Omega_m={Omega_m:.4f}, Omega_b={Omega_b:.4f}, h={h:.4f}, z={z:.1f}"
+            hp.mollview(Tb_plot + 1e-6, cbar=False, title=title,
+                        unit='mK', cmap='inferno', min=p1, max=p99)
 
             fig = plt.gcf()
             ax = plt.gca()
             image = ax.get_images()[0]
-            image.set_norm(LogNorm(vmin=5e-4, vmax=1e-2))
+            image.set_norm(LogNorm(vmin=1e-4, vmax=1))
             cbar = fig.colorbar(image, ax=ax, orientation='horizontal', pad=0.05, fraction=0.05)
-            cbar.set_label("Brightness Temperature [mK] (log scale)")
-
-
-
+            cbar.set_label("Brightness Temperature [mK] (log scale)", fontsize=12, labelpad=8)
+            cbar.ax.xaxis.set_label_position('top')
+            cbar.ax.xaxis.set_ticks_position('bottom')
             plt.savefig(os.path.join(plot_dir, plot_name))
             plt.clf()
             plt.close()
+
+
+
+
+
             shell_name = f"Tb_shell{int(shell_in)}_{int(shell_out)}"
             fits_path = os.path.join(fits_dir, f"{shell_name}.fits")
-            hp.write_map(fits_path, [Tb_fullsky.astype(np.float32), delta_Tb_fullsky.astype(np.float32)],
+            hp.write_map(fits_path, [Tb_map.astype(np.float32), delta_map.astype(np.float32)],
             column_names=['TB_mK','DTB'],
             dtype=np.float32,
             overwrite=True
@@ -191,14 +201,21 @@ for folder in all_folders:
             metadata = dict(
                 shell_in=float(shell_in),
                 shell_out=float(shell_out),
-                mass_mean=float(mass_mean),
-                mass_mean_M_HI=float(mass_mean_M_HI),
-                mass_var=float(mass_var),
-                mass_var_M_HI=float(mass_var_M_HI),
-                N_halos=int(N_halos),
-                f_sky=float(f_sky),
+                mass_mean=float(mass_shell.mean()),
+                mass_var=float(mass_shell.var()),
+                mass_mean_M_HI=float(M_HI_vals.mean()),
+                mass_var_M_HI=float(M_HI_vals.var()),
+                M_HI_tot_Msun_h=M_HI_tot_Msun_h,
+
+                N_halos=int(N_halos_shell),
+                f_sky = f_sky,
+                
+                mean_rho_HI_kg_m3=rho_HI_mean,
                 mean_Tb=float(mean_Tb),
-                sigma_beam=float(sigma_beam)          
+                model_params=dict(alpha=float(alpha), beta=float(beta), v_c0=float(v_c0), Y_p=float(Y_p)),
+                cosmo_params=dict(Omega_m=float(Omega_m), Omega_b=float(Omega_b),
+                                  h=float(h), n_s=float(n_s), sigma_8=float(sigma_8), z=float(z))
+         
             )
 
 
@@ -207,7 +224,7 @@ for folder in all_folders:
                 json.dump(metadata, f, indent=2, sort_keys=True)
 
             mask_path = os.path.join(fits_dir, f"{shell_name}_mask.fits")
-            hp.write_map(mask_path, patch_mask.astype(np.float32), overwrite=True)
+            hp.write_map(mask_path, octant_mask.astype(np.float32), overwrite=True)
             
     except Exception as e:
         print(f"Error in sim {folder}: {e}")
