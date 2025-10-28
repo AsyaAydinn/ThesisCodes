@@ -1,0 +1,242 @@
+import os, re, json, warnings
+from pathlib import Path
+import numpy as np
+import torch
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
+POWER_ROOT = Path("/project/ag-weller/Asya.Aydin/simulations/power_spectrum")
+LH_PARAMS  = Path("/project/ag-weller/Kai.Lehman/Quijote/latin_hypercube_params.txt")
+OUTDIR     = Path("/project/ag-weller/Asya.Aydin/3param_average/")  
+#new is shell averaged cl + mean tb over shell
+#new3 is cl per shell +mean tb per shell
+
+SHELL_RMIN, SHELL_RMAX = 240, 990
+OBS_SIM_ID   = 137
+N_SAMPLES    = 2_000_000  
+EPOCHS       = 200
+SBC_SAMPLES  = 2_000_000
+SBC_BINS     = 10
+SEED         = 42
+
+
+PARAM_NAMES = ["Omega_m","Omega_b","h","n_s","sigma_8"]
+ELL_BAND = (40.5, 1180.5) 
+
+PARAM_BOUNDS = {
+    "Omega_m": (0.10, 0.50),
+    "Omega_b": (0.03, 0.07),
+    "h"      : (0.50, 0.90),
+    "n_s"    : (0.80, 1.20),
+    "sigma_8": (0.60, 1.00),
+}
+
+NPZ_NAME_RE = re.compile(r"Tb_shell(\d+)_(\d+)_cl_ml\.npz$")
+def meta_name_for(npz_name: str) -> str:
+    return npz_name.replace(".npz", "_Cl_meta.json")
+
+
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+def safe_log10(x, eps=1e-30):
+    x = np.asarray(x)
+    return np.log10(np.clip(x, eps, None))
+
+
+def load_latin_params(path: Path) -> np.ndarray:
+    return np.loadtxt(path, comments="#", dtype=np.float64)[:, :len(PARAM_NAMES)]
+
+def list_sim_ids(root: Path):
+    return sorted(int(d) for d in os.listdir(root) if d.isdigit())
+
+
+def find_shells(sim_dir: Path, rmin: int, rmax: int):
+    return sorted(
+        (fn, int(m.group(1)), int(m.group(2)))
+        for fn in os.listdir(sim_dir)
+        if (m := NPZ_NAME_RE.match(fn)) and rmin <= int(m.group(1)) <= rmax
+    )
+
+
+
+X   = np.load(OUTDIR / "summaries.npy")  #so now this cl averaged per shell vs ell + mean tb er shell [for all sim]
+
+TH  = np.load(OUTDIR / "thetas.npy")
+SIDs= np.loadtxt(OUTDIR / "SIDs.txt", dtype=int)   #cosmo params
+
+
+print("Load:", X.shape, TH.shape, len(SIDs))
+if OBS_SIM_ID not in set(SIDs.tolist()):
+    raise RuntimeError(f"OBS_SIM_ID {OBS_SIM_ID} not in SIDs file: {OUTDIR/'SIDs.txt'}")
+obs_idx = int(np.where(SIDs == OBS_SIM_ID)[0][0])
+print("Observation sim:", int(SIDs[obs_idx]))
+
+import os, re, json, warnings, copy
+from pathlib import Path
+import numpy as np
+import torch
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sbi import utils as U
+from sbi.inference import SNPE
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
+mask_train = (SIDs != OBS_SIM_ID)
+S_nonobs, TH_nonobs = X[mask_train], TH[mask_train]
+
+
+
+scaler = StandardScaler().fit(S_nonobs)
+S_train = scaler.transform(S_nonobs).astype(np.float32)
+
+
+noise_level = 0.00
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+rng = np.random.default_rng(SEED)
+S_train_noisy = S_train + noise_level * rng.standard_normal(S_train.shape)
+
+
+
+#exclude h and n_S
+keep_idx = [PARAM_NAMES.index(p) for p in ["Omega_m", "Omega_b", "sigma_8"]]
+PARAM_NAMES = ["Omega_m", "Omega_b", "sigma_8"]
+PARAM_BOUNDS = {k: PARAM_BOUNDS[k] for k in PARAM_NAMES}
+
+TH_train = TH_nonobs[:, keep_idx]
+
+
+
+class SNPE_with_dataloader(SNPE):
+    def get_dataloaders(self, *args, **kwargs):
+        """Yeni sbi sürümlerinde kullanılan DataLoader fonksiyonunu yakala."""
+        loaders = super().get_dataloaders(*args, **kwargs)
+        if isinstance(loaders, tuple) and len(loaders) == 2:
+            self.train_loader, self.val_loader = loaders
+        else:
+            self.train_loader = loaders
+            self.val_loader = None
+        return loaders
+
+
+
+# ---- train_posterior fonksiyonu ----
+def train_posterior(S_train, TH_train, epochs=100, seed=42, val_fraction=0.25):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Prior tanımla
+    lows  = torch.tensor([PARAM_BOUNDS[p][0] for p in PARAM_NAMES], dtype=torch.float32, device=device)
+    highs = torch.tensor([PARAM_BOUNDS[p][1] for p in PARAM_NAMES], dtype=torch.float32, device=device)
+    prior = U.BoxUniform(low=lows, high=highs)
+
+    # Neural Spline Flow tanımla
+    from sbi.neural_nets import posterior_nn
+    density_estimator_build = posterior_nn(
+        model="nsf",
+        hidden_features=512,
+        num_transforms=8,
+        use_batch_norm=True,
+        dropout_probability=0.23,
+    )
+
+    # Genişletilmiş SNPE sınıfını kullan
+    inference = SNPE_with_dataloader(prior=prior, density_estimator=density_estimator_build, device=device)
+
+    # Simülasyonları ekle
+    thetas = torch.tensor(TH_train, dtype=torch.float32, device=device)
+    sums   = torch.tensor(S_train, dtype=torch.float32, device=device)
+    inference.append_simulations(thetas, sums)
+
+    # Eğitimi başlat (SBI kendi içinde val split yapacak)
+    density_estimator = inference.train(
+        max_num_epochs=epochs,
+        training_batch_size=32,
+        learning_rate=3e-5,
+        validation_fraction=val_fraction,
+        show_train_summary=False,
+        force_first_round_loss=True,
+        clip_max_norm=10.0,
+    )
+
+    # Posterior inşası
+    posterior = inference.build_posterior(density_estimator)
+
+    # Val DataLoader’a erişim
+    val_loader = getattr(inference, "val_loader", None)
+    if val_loader is not None:
+        print(f"✅ Internal validation DataLoader yakalandı. Batch size = {val_loader.batch_size}, #batches ≈ {len(val_loader)}")
+    else:
+        print("⚠️ Internal validation DataLoader bulunamadı (val_fraction=0?).")
+
+    return posterior, device, val_loader
+posterior, p_device, val_loader = train_posterior(S_train_noisy, TH_train, epochs=100, seed=SEED, val_fraction=0.25)
+
+x_val_all, theta_val_all = [], []
+for batch in val_loader:
+    th_val, s_val, w_val = batch  # sıralama [theta, x, weight]
+    x_val_all.append(s_val)
+    theta_val_all.append(th_val)
+
+x_val_all = torch.cat(x_val_all).cpu().numpy()
+theta_val_all = torch.cat(theta_val_all).cpu().numpy()
+
+print("Validation set shapes:", x_val_all.shape, theta_val_all.shape)
+def run_sbc_and_plot(posterior, device, X, TH, bins=20, draws=1000):
+    N, K = X.shape[0], TH.shape[1]
+    X = torch.tensor(X, dtype=torch.float32, device=device)
+    ranks = np.zeros((N, K), dtype=int)
+    with torch.no_grad():
+        for i in range(N):
+            xi = X[i:i+1]
+            try:
+                post_x = posterior.set_default_x(xi)
+                smp = post_x.sample(sample_shape=(draws,), max_sampling_batch_size=8192)
+            except Exception:
+                smp = posterior.sample(sample_shape=(draws,), x=xi, max_sampling_batch_size=8192)
+            d = smp.detach().cpu().numpy()
+            eps = (np.random.rand(*d.shape) - 0.5) * 1e-12
+            ranks[i, :] = (d < TH[i][None, :]).sum(axis=0)
+
+
+    cols = 2
+    rows = int(np.ceil(K / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 3.8*rows))
+    axes = np.array(axes).reshape(rows, cols)
+    
+    for k, p in enumerate(PARAM_NAMES):
+        ax = axes[k // cols, k % cols]
+        r = ranks[:, k]
+        u = (r + np.random.random(size=r.shape)) / (draws + 1.0)
+        counts, edges = np.histogram(u, bins=bins, range=(0,1))
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        ax.bar(centers, counts, width=1.0/bins, alpha=0.85, edgecolor="none", align="center")
+
+        # expected mean and std per bin
+        mu = N / bins
+        sigma = np.sqrt(N * (1/bins) * (1 - 1/bins))
+
+        # horizontal line for mean
+        ax.axhline(mu, lw=1.2, color="black")
+
+        # error band (mean + - σ)
+        ax.fill_between([0,1], mu - sigma, mu + sigma, color="gray", alpha=0.2)
+
+        ax.set_title(f"{p} — SBC ranks")
+        ax.set_xlabel("u")
+        ax.set_ylabel("count")
+    for kk in range(K, rows*cols):
+        axes[kk // cols, kk % cols].axis("off")
+
+    fig.tight_layout()
+    plt.show()  
+run_sbc_and_plot(posterior, p_device, x_val_all, theta_val_all)
+
+      
